@@ -42,7 +42,7 @@ def plot_time_lagged_evals(test_files: list, plot_dir: str) -> None:
             filename = test_file.rsplit("/", 1)[-1]
             parts = filename.replace(".pkl", "").split("_")
             # Format: test_time_lagged_evals_STOCK_YYYYMMDD_HHMMSS.pkl
-            stock = parts[3] if len(parts) > 3 else "unknown"
+            stock = parts[4] if len(parts) > 4 else "unknown"
             
             # Load results
             scores, score_dfs = load_results(test_file)
@@ -56,48 +56,148 @@ def plot_time_lagged_evals(test_files: list, plot_dir: str) -> None:
             real_df = score_df[score_df['type'] == 'real'].sort_index()
             gen_df = score_df[score_df['type'] == 'generated'].sort_index()
             
-            # Create figure with line plot
-            fig, ax = plt.subplots(figsize=(14, 6))
+            exp_num = "_".join(parts[-2:]) if len(parts) > 6 else "unknown"
             
-            # Plot both as lines showing drift evolution
-            if len(real_df) > 0:
-                ax.plot(range(len(real_df)), real_df['score'].values, 
-                       label='Real', linewidth=2.5, alpha=0.8, color='#1f77b4',
-                       linestyle='-', marker='', drawstyle='default')
+            # Create original time series plot
+            _plot_time_lagged_timeseries(real_df, gen_df, stock, exp_num, plot_dir)
             
-            if len(gen_df) > 0:
-                ax.plot(range(len(gen_df)), gen_df['score'].values, 
-                       label='Generated', linewidth=2.5, alpha=0.8, color='#ff7f0e',
-                       linestyle='-', marker='', drawstyle='default')
-            
-            ax.set_xlabel('Message Number', fontsize=12, fontweight='bold')
-            ax.set_ylabel('Time-Lagged Drift Distance (Wasserstein)', fontsize=12, fontweight='bold')
-            ax.set_title(f'Long-Term Drift Evolution: {stock}', fontsize=14, fontweight='bold')
-            ax.legend(fontsize=11, loc='best')
-            ax.grid(True, alpha=0.3, linestyle='--')
-            
-            # Add statistics to plot
-            if len(real_df) > 0 and len(gen_df) > 0:
-                real_mean = real_df['score'].mean()
-                gen_mean = gen_df['score'].mean()
-                textstr = f'Real mean: {real_mean:.4f}\nGen mean: {gen_mean:.4f}'
-                ax.text(0.98, 0.97, textstr, transform=ax.transAxes,
-                       verticalalignment='top', horizontalalignment='right',
-                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
-                       fontsize=10)
-            
-            plt.tight_layout()
-            
-            # Save plot
-            plot_path = f"{plot_dir}/timeseries_time_lagged_evals_{stock}.png"
-            fig.savefig(plot_path, dpi=150, bbox_inches='tight')
-            print(f"  ✓ Time series plot saved: {plot_path}")
-            plt.close(fig)
+            # Create difference plot
+            _plot_time_lagged_difference(real_df, gen_df, stock, exp_num, plot_dir)
             
         except Exception as e:
             print(f"  [!] Could not plot {test_file}: {e}")
             import traceback
             traceback.print_exc()
+
+
+def _plot_time_lagged_timeseries(real_df: pd.DataFrame, gen_df: pd.DataFrame, 
+                                  stock: str, exp_num: str, plot_dir: str) -> None:
+    """
+    Plot the original time series of real vs generated drift.
+    """
+    fig, ax = plt.subplots(figsize=(14, 6))
+    
+    # Plot both as lines showing drift evolution
+    if len(real_df) > 0:
+        ax.plot(range(len(real_df)), real_df['score'].values, 
+               label='Real', linewidth=2.5, alpha=0.8, color='#1f77b4',
+               linestyle='-', marker='', drawstyle='default')
+    
+    if len(gen_df) > 0:
+        ax.plot(range(len(gen_df)), gen_df['score'].values, 
+               label='Generated', linewidth=2.5, alpha=0.8, color='#ff7f0e',
+               linestyle='-', marker='', drawstyle='default')
+    
+    ax.set_xlabel('Message Number', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Time-Lagged Drift Distance (Wasserstein)', fontsize=12, fontweight='bold')
+    ax.set_title(f'Long-Term Drift Evolution: {stock}', fontsize=14, fontweight='bold')
+    ax.legend(fontsize=11, loc='best')
+    ax.grid(True, alpha=0.3, linestyle='--')
+    
+    # Add statistics to plot
+    if len(real_df) > 0 and len(gen_df) > 0:
+        real_mean = real_df['score'].mean()
+        gen_mean = gen_df['score'].mean()
+        textstr = f'Real mean: {real_mean:.4f}\nGen mean: {gen_mean:.4f}'
+        ax.text(0.98, 0.97, textstr, transform=ax.transAxes,
+               verticalalignment='top', horizontalalignment='right',
+               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+               fontsize=10)
+    
+    plt.tight_layout()
+    
+    plot_path = f"{plot_dir}/timeseries_time_lagged_evals_{stock}_{exp_num}.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+    print(f"  ✓ Time series plot saved: {plot_path}")
+    plt.close(fig)
+
+
+def _plot_time_lagged_difference(real_df: pd.DataFrame, gen_df: pd.DataFrame,
+                                  stock: str, exp_num: str, plot_dir: str, 
+                                  window: int = 50) -> None:
+    """
+    Plot the difference between generated and real time-lagged drift.
+    Shows where the model diverges from real data behavior.
+    
+    Args:
+        real_df: DataFrame with real data scores
+        gen_df: DataFrame with generated data scores
+        stock: Stock symbol
+        exp_num: Experiment identifier
+        plot_dir: Directory to save plots
+        window: Rolling window size for smoothing
+    """
+    if len(real_df) == 0 or len(gen_df) == 0:
+        print(f"  [!] Skipping difference plot: insufficient data")
+        return
+    
+    # Ensure same length for comparison
+    min_len = min(len(real_df), len(gen_df))
+    real_scores = real_df['score'].values[:min_len]
+    gen_scores = gen_df['score'].values[:min_len]
+    
+    # Compute difference
+    diff = gen_scores - real_scores
+    
+    fig, axes = plt.subplots(3, 1, figsize=(14, 12))
+    
+    # Plot 1: Original signals overlay
+    ax = axes[0]
+    ax.plot(real_scores, label='Real', alpha=0.7, linewidth=1.5, color='#1f77b4')
+    ax.plot(gen_scores, label='Generated', alpha=0.7, linewidth=1.5, color='#ff7f0e')
+    ax.set_ylabel('Wasserstein Distance', fontsize=11, fontweight='bold')
+    ax.set_title(f'Time-Lagged Drift Evolution: {stock}', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10, loc='best')
+    ax.grid(True, alpha=0.3, linestyle='--')
+    
+    # Plot 2: Difference (main insight)
+    ax = axes[1]
+    ax.plot(diff, color='purple', alpha=0.8, linewidth=1.5, label='Difference')
+    ax.axhline(y=0, color='black', linestyle='--', linewidth=1.5, alpha=0.7)
+    ax.fill_between(range(len(diff)), 0, diff, 
+                     where=(diff>0), alpha=0.3, color='red', label='Gen drifts more')
+    ax.fill_between(range(len(diff)), 0, diff,
+                     where=(diff<0), alpha=0.3, color='green', label='Gen drifts less')
+    ax.set_ylabel('Difference (Gen - Real)', fontsize=11, fontweight='bold')
+    ax.set_title('Drift Difference: Where Model Diverges', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10, loc='best')
+    ax.grid(True, alpha=0.3, linestyle='--')
+    
+    # Add statistics
+    mean_diff = diff.mean()
+    std_diff = diff.std()
+    median_diff = np.median(diff)
+    abs_mean_diff = np.abs(diff).mean()
+    textstr = (f'Mean: {mean_diff:.4f}\n'
+               f'Median: {median_diff:.4f}\n'
+               f'Std: {std_diff:.4f}\n'
+               f'Abs Mean: {abs_mean_diff:.4f}')
+    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, 
+            verticalalignment='top', horizontalalignment='left',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.6),
+            fontsize=9, family='monospace')
+    
+    # Plot 3: Rolling mean difference (trend)
+    ax = axes[2]
+    rolling_diff = pd.Series(diff).rolling(window=window, center=True).mean()
+    ax.plot(rolling_diff, color='darkblue', linewidth=2, label=f'{window}-msg rolling mean')
+    ax.axhline(y=0, color='black', linestyle='--', linewidth=1.5, alpha=0.7)
+    ax.fill_between(range(len(rolling_diff)), 0, rolling_diff, 
+                     where=(rolling_diff>0), alpha=0.3, color='red')
+    ax.fill_between(range(len(rolling_diff)), 0, rolling_diff,
+                     where=(rolling_diff<0), alpha=0.3, color='green')
+    ax.set_xlabel('Message Number', fontsize=11, fontweight='bold')
+    ax.set_ylabel(f'Rolling Difference', fontsize=11, fontweight='bold')
+    ax.set_title(f'Smoothed Drift Difference (window={window})', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10, loc='best')
+    ax.grid(True, alpha=0.3, linestyle='--')
+    
+    plt.tight_layout()
+    
+    plot_path = f"{plot_dir}/difference_time_lagged_evals_{stock}_{exp_num}.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+    print(f"  ✓ Difference plot saved: {plot_path}")
+    plt.close(fig)
 
 
 def _load_all_scores(files):

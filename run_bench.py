@@ -113,7 +113,7 @@ DEFAULT_SCORING_CONFIG = {
         "fn": lambda m, b: eval.orderflow_imbalance_cond_tick(m, b, -1).values,
     },
     "time_lagged_evals": {
-        "fn": lambda m, b: eval.time_lagged_evals(m, b, window_size=500, lookback_steps=500),
+        "fn": lambda m, b: eval.time_lagged_evals(m, b, window_size=100, lookback_steps=50),
         "discrete": False,
         "metric_fns": {
             "wasserstein": metrics.wasserstein,
