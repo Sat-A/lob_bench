@@ -112,6 +112,13 @@ DEFAULT_SCORING_CONFIG = {
     "ofi_down": {
         "fn": lambda m, b: eval.orderflow_imbalance_cond_tick(m, b, -1).values,
     },
+    "time_lagged_evals": {
+        "fn": lambda m, b: eval.time_lagged_evals(m, b, window_size=100, lookback_steps=50),
+        "discrete": False,
+        "metric_fns": {
+            "wasserstein": metrics.wasserstein,
+        }
+    },
 }
 
 
@@ -343,6 +350,160 @@ def run_benchmark(
                     print("[*] Done")
 
 
+def test_metric(
+    metric_name: str,
+    stock: str = "GOOG",
+    model_name: str = "s5_main",
+    time_period: str = "2023_Jan",
+    data_dir: str = "./data/data/evalsequences",
+    save_dir: str = "./results",
+) -> None:
+    """
+    Test a specific metric with real and generated data.
+    Loads data, computes the metric, and generates plots.
+    
+    Args:
+        metric_name: Name of the metric to test (must be in DEFAULT_SCORING_CONFIG)
+        stock: Stock symbol
+        model_name: Model name
+        time_period: Time period
+        data_dir: Data directory path
+        save_dir: Directory to save results
+    """
+    print("=" * 70)
+    print(f"TESTING METRIC: {metric_name}")
+    print("=" * 70)
+    
+    # Validate metric exists
+    if metric_name not in DEFAULT_SCORING_CONFIG:
+        print(f"\n[!] ERROR: '{metric_name}' not found in DEFAULT_SCORING_CONFIG")
+        print(f"\nAvailable metrics:")
+        for i, name in enumerate(DEFAULT_SCORING_CONFIG.keys(), 1):
+            print(f"  {i}. {name}")
+        return
+    
+    # Build path to data
+    stock_model_path = f"{data_dir}/{model_name}/{stock}/{time_period}"
+    
+    print(f"\n[*] Loading data from: {stock_model_path}")
+    try:
+        loader = data_loading.Simple_Loader(
+            stock_model_path + "/data_real",
+            stock_model_path + "/data_gen",
+            stock_model_path + "/data_cond",
+        )
+    except Exception as e:
+        print(f"[!] ERROR loading data: {e}")
+        return
+    
+    # Materialize sequences
+    print("[*] Materializing sequences...")
+    for s in loader:
+        s.materialize()
+    
+    # Create config with only the test metric
+    test_config = {metric_name: DEFAULT_SCORING_CONFIG[metric_name]}
+    
+    print(f"[*] Running metric: {metric_name}")
+    try:
+        scores, score_dfs, plot_fns = scoring.run_benchmark(
+            loader,
+            test_config,
+            default_metric=DEFAULT_METRICS
+        )
+    except Exception as e:
+        print(f"[!] ERROR computing metric: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    
+    # Display results
+    print(f"\n{'=' * 70}")
+    print(f"RESULTS FOR {metric_name}")
+    print(f"{'=' * 70}")
+    
+    if metric_name in scores:
+        metric_results = scores[metric_name]
+        print(f"\nMetric scores computed:")
+        for metric_fn_name, (point_est, ci, bootstraps) in metric_results.items():
+            print(f"\n  {metric_fn_name}:")
+            print(f"    Point estimate: {point_est:.6f}")
+            print(f"    CI [95%]: [{ci[0]:.6f}, {ci[1]:.6f}]")
+            print(f"    Bootstrap samples: {len(bootstraps)}")
+    
+    # Display score dataframe info
+    if metric_name in score_dfs:
+        score_df = score_dfs[metric_name]
+        print(f"\nScore DataFrame:")
+        print(f"  Shape: {score_df.shape}")
+        print(f"  Columns: {list(score_df.columns)}")
+        print(f"  Real samples: {(score_df['type'] == 'real').sum()}")
+        print(f"  Generated samples: {(score_df['type'] == 'generated').sum()}")
+        real_scores = score_df[score_df['type']=='real']['score']
+        gen_scores = score_df[score_df['type']=='generated']['score']
+        if len(real_scores) > 0 and len(gen_scores) > 0:
+            print(f"\n  Real scores - Min: {real_scores.min():.6f}, "
+                  f"Max: {real_scores.max():.6f}, "
+                  f"Mean: {real_scores.mean():.6f}")
+            print(f"  Gen scores  - Min: {gen_scores.min():.6f}, "
+                  f"Max: {gen_scores.max():.6f}, "
+                  f"Mean: {gen_scores.mean():.6f}")
+    
+    # Generate plots
+    print(f"\n[*] Generating plots...")
+    time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plot_path = f"{save_dir}/plots/test_{metric_name}_{stock}_{time_str}.png"
+    
+    # Create directory if needed
+    pathlib.Path(f"{save_dir}/plots").mkdir(parents=True, exist_ok=True)
+    
+    try:
+        import matplotlib.pyplot as plt
+        
+        # Try to use existing plot function first
+        if metric_name in plot_fns and plot_fns[metric_name] is not None:
+            fig = plot_fns[metric_name]('score', 'score', bins=30, binwidth=None)
+        else:
+            # Fallback: generate histogram manually if plot function is None
+            if metric_name in score_dfs:
+                score_df = score_dfs[metric_name]
+                real_scores = score_df[score_df['type'] == 'real']['score']
+                gen_scores = score_df[score_df['type'] == 'generated']['score']
+                
+                fig, ax = plt.subplots(figsize=(12, 6))
+                ax.hist(real_scores, bins=30, alpha=0.6, label='Real', edgecolor='black')
+                ax.hist(gen_scores, bins=30, alpha=0.6, label='Generated', edgecolor='black')
+                ax.set_xlabel('Score')
+                ax.set_ylabel('Frequency')
+                ax.set_title(f'{metric_name}: Real vs Generated Distribution')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+            else:
+                fig = None
+        
+        if fig is not None:
+            fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+            print(f"  ✓ Plot saved to: {plot_path}")
+            plt.close(fig)
+        else:
+            print(f"  [!] Could not generate plot: no score data")
+    except Exception as e:
+        print(f"  [!] Could not generate plot: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Save results
+    print(f"\n[*] Saving test results...")
+    time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_path = f"{save_dir}/scores/test_{metric_name}_{stock}_{time_str}.pkl"
+    pathlib.Path(f"{save_dir}/scores").mkdir(parents=True, exist_ok=True)
+    save_results(scores, score_dfs, results_path)
+    print(f"  ✓ Results saved to: {results_path}")
+    
+    print(f"\n{'=' * 70}")
+    print(f"TEST COMPLETE: {metric_name}")
+    print(f"{'=' * 70}\n")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -359,7 +520,22 @@ if __name__ == "__main__":
     parser.add_argument("--all", action="store_true", dest="run_all")
     parser.add_argument("--div_error_bounds", action="store_true")
     parser.add_argument("--divergence_horizon", type=int, default=100)
+    parser.add_argument("--test", type=str, default=None,
+                        help="Test a specific metric (e.g., --test time_lagged_evals)")
     args = parser.parse_args()
+
+    # Handle test mode
+    if args.test:
+        print("\n[*] Running in TEST MODE")
+        test_metric(
+            args.test,
+            stock=args.stock[0] if isinstance(args.stock, list) else args.stock,
+            model_name=args.model_name[0] if isinstance(args.model_name, list) else args.model_name,
+            time_period=args.time_period[0] if isinstance(args.time_period, list) else args.time_period,
+            data_dir=args.data_dir,
+            save_dir=args.save_dir,
+        )
+        exit(0)
 
     # Validate that --all is not combined with specific scoring flags
     if args.run_all:
@@ -376,8 +552,11 @@ if __name__ == "__main__":
         print("    --context_only        : Run only contextual scoring")
         print("    --div_only            : Run only divergence scoring")
         print("    --all                 : Run all scoring types")
+        print("\n    Testing Options:")
+        print("    --test METRIC         : Test a specific metric (e.g., --test time_lagged_evals)")
         print("\n    Example: python run_bench.py --context_only --stock GOOG --model_name s5_main")
-        print("             python run_bench.py --all --stock GOOG INTC --model_name s5_main s5v2_uncond\n")
+        print("             python run_bench.py --all --stock GOOG INTC --model_name s5_main s5v2_uncond")
+        print("             python run_bench.py --test time_lagged_evals --stock GOOG --model_name s5_main\n")
         exit(1)
     
     # Prevent conflicting single-type flags

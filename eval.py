@@ -84,13 +84,38 @@ def mean_per_interval(
 
 def mid_price(
         messages: pd.DataFrame,
-        book: pd.DataFrame
+        book: pd.DataFrame,
+        warn_inversion: bool = True,
     ) -> pd.Series:
     """
     Calculate mid-price of book.
+    Validates book integrity: best_bid <= best_ask.
     """
-    mid = (book.iloc[:, 0] + book.iloc[:, 2]) / 2
-    mid.index = messages.time
+    best_bid = book.iloc[:, 0].values
+    best_ask = book.iloc[:, 2].values
+    
+    # Validate book integrity
+    assert np.all(best_bid >= 0), "Negative bid prices found"
+    assert np.all(best_ask >= 0), "Negative ask prices found"
+
+    # Handle occasional book inversions by swapping bid/ask
+    inverted = best_bid > best_ask
+    if np.any(inverted):
+        if warn_inversion:
+            import warnings
+            warnings.warn(
+                f"Book inversion detected in {inverted.sum()} rows; swapping bid/ask for mid-price calculation.",
+                RuntimeWarning
+            )
+        bid_fixed = np.where(inverted, best_ask, best_bid)
+        ask_fixed = np.where(inverted, best_bid, best_ask)
+    else:
+        bid_fixed = best_bid
+        ask_fixed = best_ask
+
+    mid = (bid_fixed + ask_fixed) / 2.0
+    mid = pd.Series(mid, index=messages.time)
+    mid.name = 'mid_price'
     return mid
 
 def spread(
@@ -461,6 +486,62 @@ def orderflow_imbalance_cond_tick(
     })
     df["direction"] = np.sign(df["mid_price_diff"])
     return df.loc[df["direction"] == tick_sign, "imb_prev"]
+
+def time_lagged_evals(
+        messages: pd.DataFrame,
+        book: pd.DataFrame,
+        window_size: int = 100,
+        lookback_steps: int = 50,
+    ) -> np.ndarray:
+    """
+    Compute distributional drift using Wasserstein distance between time-lagged windows.
+    
+    For each message i >= window_size + lookback_steps, compares the distribution of 
+    raw mid-prices in window [i-window_size:i] against the lagged window 
+    [i-window_size-lookback_steps:i-lookback_steps] using Wasserstein distance.
+    
+    Early messages without sufficient history are skipped entirely (not padded with NaN).
+    
+    Args:
+        messages: DataFrame with message data
+        book: DataFrame with orderbook states
+        window_size: Number of samples in each window for distribution comparison
+        lookback_steps: How many steps back to compare against
+        
+    Returns:
+        Array of Wasserstein distances, length = max(0, len(messages) - window_size - lookback_steps)
+        Returns empty array if sequence is too short.
+    """
+    from scipy.stats import wasserstein_distance
+    
+    # Get mid-price series (already validated by mid_price function)
+    mid_prices = mid_price(messages, book, warn_inversion=False).values
+    
+    min_required = window_size + lookback_steps
+    if len(mid_prices) < min_required:
+        # Sequence too short, return empty array
+        return np.array([], dtype=float)
+    
+    drift_scores = []
+    
+    # Start from index where we have sufficient history
+    # We need: i - window_size - lookback_steps >= 0
+    # So: i >= window_size + lookback_steps
+    start_idx = window_size + lookback_steps
+    
+    for i in range(start_idx, len(mid_prices)):
+        # Current window: [i-window_size:i]
+        current_window = mid_prices[i - window_size:i]
+        
+        # Lagged window: [i-window_size-lookback_steps:i-lookback_steps]
+        lagged_window = mid_prices[i - window_size - lookback_steps:i - lookback_steps]
+        
+        # Compute Wasserstein distance between the two distributions
+        w_dist = wasserstein_distance(lagged_window, current_window)
+        drift_scores.append(w_dist)
+    
+    return np.array(drift_scores, dtype=float)
+
 
 def compute_3d_book_changes(messages: pd.DataFrame, book: pd.DataFrame) -> pd.Series:
     """
