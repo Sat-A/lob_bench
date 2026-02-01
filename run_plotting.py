@@ -113,8 +113,7 @@ def _plot_time_lagged_timeseries(real_df: pd.DataFrame, gen_df: pd.DataFrame,
 
 
 def _plot_time_lagged_difference(real_df: pd.DataFrame, gen_df: pd.DataFrame,
-                                  stock: str, exp_num: str, plot_dir: str, 
-                                  window: int = 50) -> None:
+                                  stock: str, exp_num: str, plot_dir: str) -> None:
     """
     Plot the difference between generated and real time-lagged drift.
     Shows where the model diverges from real data behavior.
@@ -125,7 +124,6 @@ def _plot_time_lagged_difference(real_df: pd.DataFrame, gen_df: pd.DataFrame,
         stock: Stock symbol
         exp_num: Experiment identifier
         plot_dir: Directory to save plots
-        window: Rolling window size for smoothing
     """
     if len(real_df) == 0 or len(gen_df) == 0:
         print(f"  [!] Skipping difference plot: insufficient data")
@@ -139,7 +137,7 @@ def _plot_time_lagged_difference(real_df: pd.DataFrame, gen_df: pd.DataFrame,
     # Compute difference
     diff = gen_scores - real_scores
     
-    fig, axes = plt.subplots(3, 1, figsize=(14, 12))
+    fig, axes = plt.subplots(2, 1, figsize=(14, 9))
     
     # Plot 1: Original signals overlay
     ax = axes[0]
@@ -152,12 +150,18 @@ def _plot_time_lagged_difference(real_df: pd.DataFrame, gen_df: pd.DataFrame,
     
     # Plot 2: Difference (main insight)
     ax = axes[1]
-    ax.plot(diff, color='purple', alpha=0.8, linewidth=1.5, label='Difference')
-    ax.axhline(y=0, color='black', linestyle='--', linewidth=1.5, alpha=0.7)
+    y_min = np.nanmin(diff)
+    y_max = np.nanmax(diff)
+    pad = 0.05 * (y_max - y_min) if y_max > y_min else 1.0
+    ax.set_ylim(y_min - pad, y_max + pad)
+    ax.axhspan(0, ax.get_ylim()[1], facecolor='red', alpha=0.08, zorder=0)
+    ax.axhspan(ax.get_ylim()[0], 0, facecolor='blue', alpha=0.08, zorder=0)
+    ax.plot(diff, color='purple', alpha=0.85, linewidth=1.6, label='Difference')
+    ax.axhline(y=0, color='black', linestyle='--', linewidth=1.6, alpha=0.8)
     ax.fill_between(range(len(diff)), 0, diff, 
-                     where=(diff>0), alpha=0.3, color='red', label='Gen drifts more')
+                     where=(diff>0), alpha=0.35, color='red', label='Gen drifts more')
     ax.fill_between(range(len(diff)), 0, diff,
-                     where=(diff<0), alpha=0.3, color='green', label='Gen drifts less')
+                     where=(diff<0), alpha=0.35, color='blue', label='Gen drifts less')
     ax.set_ylabel('Difference (Gen - Real)', fontsize=11, fontweight='bold')
     ax.set_title('Drift Difference: Where Model Diverges', fontsize=13, fontweight='bold')
     ax.legend(fontsize=10, loc='best')
@@ -177,20 +181,7 @@ def _plot_time_lagged_difference(real_df: pd.DataFrame, gen_df: pd.DataFrame,
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.6),
             fontsize=9, family='monospace')
     
-    # Plot 3: Rolling mean difference (trend)
-    ax = axes[2]
-    rolling_diff = pd.Series(diff).rolling(window=window, center=True).mean()
-    ax.plot(rolling_diff, color='darkblue', linewidth=2, label=f'{window}-msg rolling mean')
-    ax.axhline(y=0, color='black', linestyle='--', linewidth=1.5, alpha=0.7)
-    ax.fill_between(range(len(rolling_diff)), 0, rolling_diff, 
-                     where=(rolling_diff>0), alpha=0.3, color='red')
-    ax.fill_between(range(len(rolling_diff)), 0, rolling_diff,
-                     where=(rolling_diff<0), alpha=0.3, color='green')
     ax.set_xlabel('Message Number', fontsize=11, fontweight='bold')
-    ax.set_ylabel(f'Rolling Difference', fontsize=11, fontweight='bold')
-    ax.set_title(f'Smoothed Drift Difference (window={window})', fontsize=13, fontweight='bold')
-    ax.legend(fontsize=10, loc='best')
-    ax.grid(True, alpha=0.3, linestyle='--')
     
     plt.tight_layout()
     
