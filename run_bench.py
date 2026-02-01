@@ -113,7 +113,7 @@ DEFAULT_SCORING_CONFIG = {
         "fn": lambda m, b: eval.orderflow_imbalance_cond_tick(m, b, -1).values,
     },
     "time_lagged_evals": {
-        "fn": lambda m, b: eval.time_lagged_evals(m, b, window_size=100, lookback_steps=50),
+        "fn": lambda m, b: eval.time_lagged_evals(m, b, window_size=500, lookback_steps=500),
         "discrete": False,
         "metric_fns": {
             "wasserstein": metrics.wasserstein,
@@ -448,49 +448,6 @@ def test_metric(
             print(f"  Gen scores  - Min: {gen_scores.min():.6f}, "
                   f"Max: {gen_scores.max():.6f}, "
                   f"Mean: {gen_scores.mean():.6f}")
-    
-    # Generate plots
-    print(f"\n[*] Generating plots...")
-    time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    plot_path = f"{save_dir}/plots/test_{metric_name}_{stock}_{time_str}.png"
-    
-    # Create directory if needed
-    pathlib.Path(f"{save_dir}/plots").mkdir(parents=True, exist_ok=True)
-    
-    try:
-        import matplotlib.pyplot as plt
-        
-        # Try to use existing plot function first
-        if metric_name in plot_fns and plot_fns[metric_name] is not None:
-            fig = plot_fns[metric_name]('score', 'score', bins=30, binwidth=None)
-        else:
-            # Fallback: generate histogram manually if plot function is None
-            if metric_name in score_dfs:
-                score_df = score_dfs[metric_name]
-                real_scores = score_df[score_df['type'] == 'real']['score']
-                gen_scores = score_df[score_df['type'] == 'generated']['score']
-                
-                fig, ax = plt.subplots(figsize=(12, 6))
-                ax.hist(real_scores, bins=30, alpha=0.6, label='Real', edgecolor='black')
-                ax.hist(gen_scores, bins=30, alpha=0.6, label='Generated', edgecolor='black')
-                ax.set_xlabel('Score')
-                ax.set_ylabel('Frequency')
-                ax.set_title(f'{metric_name}: Real vs Generated Distribution')
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-            else:
-                fig = None
-        
-        if fig is not None:
-            fig.savefig(plot_path, dpi=150, bbox_inches='tight')
-            print(f"  ✓ Plot saved to: {plot_path}")
-            plt.close(fig)
-        else:
-            print(f"  [!] Could not generate plot: no score data")
-    except Exception as e:
-        print(f"  [!] Could not generate plot: {e}")
-        import traceback
-        traceback.print_exc()
     
     # Save results
     print(f"\n[*] Saving test results...")

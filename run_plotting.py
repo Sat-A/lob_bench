@@ -24,6 +24,82 @@ def warn_with_traceback(message, category, filename, lineno, file=None, line=Non
 warnings.showwarning = warn_with_traceback
 
 
+def plot_time_lagged_evals(test_files: list, plot_dir: str) -> None:
+    """
+    Plot time-lagged evals results as time series lines.
+    Shows drift evolution over message sequence for real vs generated.
+    
+    Args:
+        test_files: List of test_time_lagged_evals_*.pkl files
+        plot_dir: Directory to save plots
+    """
+    if len(test_files) == 0:
+        return
+    
+    for test_file in test_files:
+        try:
+            # Extract metadata from filename
+            filename = test_file.rsplit("/", 1)[-1]
+            parts = filename.replace(".pkl", "").split("_")
+            # Format: test_time_lagged_evals_STOCK_YYYYMMDD_HHMMSS.pkl
+            stock = parts[3] if len(parts) > 3 else "unknown"
+            
+            # Load results
+            scores, score_dfs = load_results(test_file)
+            
+            if "time_lagged_evals" not in score_dfs:
+                continue
+            
+            score_df = score_dfs["time_lagged_evals"]
+            
+            # Sort by index for temporal order
+            real_df = score_df[score_df['type'] == 'real'].sort_index()
+            gen_df = score_df[score_df['type'] == 'generated'].sort_index()
+            
+            # Create figure with line plot
+            fig, ax = plt.subplots(figsize=(14, 6))
+            
+            # Plot both as lines showing drift evolution
+            if len(real_df) > 0:
+                ax.plot(range(len(real_df)), real_df['score'].values, 
+                       label='Real', linewidth=2.5, alpha=0.8, color='#1f77b4',
+                       linestyle='-', marker='', drawstyle='default')
+            
+            if len(gen_df) > 0:
+                ax.plot(range(len(gen_df)), gen_df['score'].values, 
+                       label='Generated', linewidth=2.5, alpha=0.8, color='#ff7f0e',
+                       linestyle='-', marker='', drawstyle='default')
+            
+            ax.set_xlabel('Message Number', fontsize=12, fontweight='bold')
+            ax.set_ylabel('Time-Lagged Drift Distance (Wasserstein)', fontsize=12, fontweight='bold')
+            ax.set_title(f'Long-Term Drift Evolution: {stock}', fontsize=14, fontweight='bold')
+            ax.legend(fontsize=11, loc='best')
+            ax.grid(True, alpha=0.3, linestyle='--')
+            
+            # Add statistics to plot
+            if len(real_df) > 0 and len(gen_df) > 0:
+                real_mean = real_df['score'].mean()
+                gen_mean = gen_df['score'].mean()
+                textstr = f'Real mean: {real_mean:.4f}\nGen mean: {gen_mean:.4f}'
+                ax.text(0.98, 0.97, textstr, transform=ax.transAxes,
+                       verticalalignment='top', horizontalalignment='right',
+                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+                       fontsize=10)
+            
+            plt.tight_layout()
+            
+            # Save plot
+            plot_path = f"{plot_dir}/timeseries_time_lagged_evals_{stock}.png"
+            fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+            print(f"  ✓ Time series plot saved: {plot_path}")
+            plt.close(fig)
+            
+        except Exception as e:
+            print(f"  [!] Could not plot {test_file}: {e}")
+            import traceback
+            traceback.print_exc()
+
+
 def _load_all_scores(files):
     all_scores = {}
     all_dfs = {}
@@ -81,6 +157,7 @@ def run_plotting(
     cond_files = sorted(glob(score_dir + "/scores_cond_*.pkl"))
     context_files = sorted(glob(score_dir + "/scores_context_*.pkl"))
     div_files = sorted(glob(score_dir + "/scores_div_*.pkl"))
+    test_files = sorted(glob(score_dir + "/test_time_lagged_evals_*.pkl"))
     if len(div_files) > 0:
         div_horizon_length = int(div_files[0].split("_")[-3])
 
@@ -278,6 +355,11 @@ def run_plotting(
                         bbox_inches="tight", dpi=300
                     )
                     plt.close()
+
+    # TIME-LAGGED EVALS PLOTS
+    if len(test_files) > 0:
+        print("[*] Plotting time-lagged evals results")
+        plot_time_lagged_evals(test_files, plot_dir)
 
     print("[*] Done")
 
