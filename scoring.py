@@ -148,8 +148,8 @@ def score_data_time_lagged(
     lag: int,
     *,
     return_plot_fn: bool = False,
-    score_kwargs: dict = {},
-    score_lagged_kwargs: dict = {},
+    score_kwargs: Optional[dict] = None,
+    score_lagged_kwargs: Optional[dict] = None,
 ):
     """
     Time-lagged conditional scoring: evaluate scoring_fn at time t conditioned on 
@@ -168,58 +168,111 @@ def score_data_time_lagged(
     - 'subgroup' is the bin of the evaluation metric within each lagged group
     - 'score_lagged' is the value of the conditioning metric at t-lag
     """
+    score_kwargs = score_kwargs or {}
+    score_lagged_kwargs = score_lagged_kwargs or {}
     
     def merge_and_score_lagged(seqs, is_real=True):
         """
         Merge conditional + real/gen data, compute lagged conditioning scores.
-        Returns: (scores_lagged, scores_eval) both arrays
+        Returns: (scores_lagged, scores_eval) both as lists of arrays
+        
+        Lag alignment strategy:
+        1. Merge conditional + real/gen data
+        2. Slice off the conditional prefix (first cond_len rows)
+        3. Slice off the first lag rows to align conditioning and evaluation
+        4. Compute scores on sliced data so they're properly aligned
         """
         scores_lagged_list = []
         scores_eval_list = []
         
         for seq in seqs:
-            # Merge conditional + real or generated
-            if is_real:
-                m_merged = pd.concat([seq.m_cond, seq.m_real], ignore_index=True)
-                b_merged = pd.concat([seq.b_cond, seq.b_real], ignore_index=True)
+            # Handle case where conditional data is None (unconditional models)
+            m_cond_data = seq.m_cond
+            b_cond_data = seq.b_cond
+            
+            if m_cond_data is None or b_cond_data is None:
+                cond_len = 0
             else:
-                # For generated, process each generated sample
-                for m_gen, b_gen in zip(seq.m_gen, seq.b_gen):
-                    m_merged = pd.concat([seq.m_cond, m_gen], ignore_index=True)
-                    b_merged = pd.concat([seq.b_cond, b_gen], ignore_index=True)
-                    
-                    # Compute lagged conditioning metric
-                    score_lagged_full = scoring_fn_lagged(m_merged, b_merged)
-                    # Shift by lag and drop first lag points
-                    score_lagged_shifted = score_lagged_full[lag:]
-                    
-                    # Compute evaluation metric (aligned with shifted conditioning)
-                    score_eval = scoring_fn(m_merged, b_merged)[lag:]
-                    
-                    scores_lagged_list.append(score_lagged_shifted)
-                    scores_eval_list.append(score_eval)
-                return scores_lagged_list, scores_eval_list
+                cond_len = len(m_cond_data)
             
-            # Real branch (single realization)
-            # Compute lagged conditioning metric
-            score_lagged_full = scoring_fn_lagged(m_merged, b_merged)
-            # Shift by lag and drop first lag points
-            score_lagged_shifted = score_lagged_full[lag:]
+            if is_real:
+                pairs = [(m_cond_data, b_cond_data, seq.m_real, seq.b_real)]
+            else:
+                pairs = [(m_cond_data, b_cond_data, m_gen, b_gen) 
+                         for m_gen, b_gen in zip(seq.m_gen, seq.b_gen)]
             
-            # Compute evaluation metric (aligned with shifted conditioning)
-            score_eval = scoring_fn(m_merged, b_merged)[lag:]
-            
-            scores_lagged_list.append(score_lagged_shifted)
-            scores_eval_list.append(score_eval)
+            for m_cond, b_cond, m_data, b_data in pairs:
+                # Handle case where conditional data is None or empty
+                if m_cond is None or b_cond is None or len(m_cond) == 0 or len(b_cond) == 0:
+                    # No conditional sequence, use data as-is
+                    m_merged = m_data.copy()
+                    b_merged = b_data.copy()
+                    cond_len = 0
+                else:
+                    # Merge conditional + data, filtering out None and empty dataframes
+                    dfs_m = [df for df in [m_cond, m_data] if df is not None and len(df) > 0]
+                    dfs_b = [df for df in [b_cond, b_data] if df is not None and len(df) > 0]
+                    
+                    if not dfs_m or not dfs_b:
+                        # No valid data to merge, skip
+                        continue
+                    
+                    m_merged = pd.concat(dfs_m, ignore_index=False)
+                    b_merged = pd.concat(dfs_b, ignore_index=False)
+                
+                # Trim off conditional prefix
+                if cond_len > 0 and (cond_len >= len(m_merged) or cond_len >= len(b_merged)):
+                    # No data after conditional, skip
+                    continue
+                m_after_cond = m_merged.iloc[cond_len:]
+                b_after_cond = b_merged.iloc[cond_len:]
+                
+                # Trim off lag points
+                if lag >= len(m_after_cond) or lag >= len(b_after_cond):
+                    # Sequence too short after removing conditional and lag, skip
+                    continue
+                m_trimmed = m_after_cond.iloc[lag:]
+                b_trimmed = b_after_cond.iloc[lag:]
+                
+                # Also keep earlier part for lagged conditioning (shifted by lag)
+                m_for_lagged = m_after_cond.iloc[:len(m_trimmed)]
+                b_for_lagged = b_after_cond.iloc[:len(b_trimmed)]
+                
+                if len(m_trimmed) == 0:
+                    continue
+                
+                # Compute scores on properly aligned data
+                score_lagged = scoring_fn_lagged(m_for_lagged, b_for_lagged)
+                score_eval = scoring_fn(m_trimmed, b_trimmed)
+                
+                # Ensure both are numpy arrays
+                if not isinstance(score_lagged, np.ndarray):
+                    score_lagged = np.asarray(score_lagged)
+                if not isinstance(score_eval, np.ndarray):
+                    score_eval = np.asarray(score_eval)
+                
+                # Verify lengths match
+                if len(score_lagged) != len(score_eval):
+                    # Trim to match
+                    min_len = min(len(score_lagged), len(score_eval))
+                    score_lagged = score_lagged[:min_len]
+                    score_eval = score_eval[:min_len]
+                
+                if len(score_eval) == 0:
+                    continue
+                
+                scores_lagged_list.append(score_lagged)
+                scores_eval_list.append(score_eval)
         
-        # Concatenate all scores
-        scores_lagged = np.concatenate(scores_lagged_list) if scores_lagged_list else np.array([])
-        scores_eval = np.concatenate(scores_eval_list) if scores_eval_list else np.array([])
-        return scores_lagged, scores_eval
+        return scores_lagged_list, scores_eval_list
     
     # Compute lagged conditioning scores and evaluation scores
     scores_lagged_real, scores_eval_real = merge_and_score_lagged(loader, is_real=True)
     scores_lagged_gen, scores_eval_gen = merge_and_score_lagged(loader, is_real=False)
+    
+    # Guard against empty data - return None to signal insufficient data
+    if not scores_lagged_real or not scores_lagged_gen:
+        return None, None
     
     # Stage 1: Bin based on lagged conditioning metric
     groups_real, groups_gen, thresholds = partitioning.group_by_score(
@@ -236,6 +289,7 @@ def score_data_time_lagged(
     
     # Stage 2: For each lagged group, bin the evaluation scores
     score_df['subgroup'] = -1
+    score_df['score_lagged'] = score_df_lagged.score
     score_df['score_cond'] = score_df_lagged.score
     sub_dfs = [df[1] for df in score_df.groupby('group')]
     new_dfs = []
@@ -440,13 +494,19 @@ def compute_metrics_time_lagged(
     Returns:
         metric: Dictionary of metric values
         score_df: DataFrame with scores and groupings
-        plot_fn: Plotting function
+        plot_fn: Plotting function (or None if insufficient data)
     """
     score_df, plot_fn = score_data_time_lagged(
         loader, scoring_fn, scoring_fn_lagged, lag,
         return_plot_fn=True, score_kwargs=score_kwargs,
         score_lagged_kwargs=score_lagged_kwargs
     )
+    
+    # Handle insufficient data case
+    if score_df is None:
+        print(f"  Warning: Insufficient data for time-lagged analysis with lag={lag}. "
+              f"Sequences may be too short relative to lag. Skipping this configuration.")
+        return None, None, None
 
     # calc. loss for each of the conditional distributions
     lens = []
@@ -644,16 +704,22 @@ def run_benchmark(
             score_fn_cond = score_cond_config["fn"]
             metric_fns = score_config_eval.get("metric_fns", default_metric)
             
-            scores[score_name], score_dfs[score_name], plot_fns[score_name] = \
-                compute_metrics_time_lagged(
-                    loader,
-                    score_config_eval["fn"],
-                    metric_fns,
-                    score_fn_cond,
-                    lag,
-                    score_kwargs=score_kwargs,
-                    score_lagged_kwargs=score_cond_kwargs,
-                )
+            score_result = compute_metrics_time_lagged(
+                loader,
+                score_config_eval["fn"],
+                metric_fns,
+                score_fn_cond,
+                lag,
+                score_kwargs=score_kwargs,
+                score_lagged_kwargs=score_cond_kwargs,
+            )
+            
+            # Handle case where insufficient data was available
+            if score_result[0] is None:
+                print(f"  Skipping score '{score_name}' due to insufficient data for time-lagged analysis.")
+                continue
+            
+            scores[score_name], score_dfs[score_name], plot_fns[score_name] = score_result
 
         # contextual scoring
         elif contextual:
@@ -741,6 +807,11 @@ def summary_stats(
     return_dict = {}
     # for each metric:
     values_list = list(scores.values())
+    
+    # Handle empty scores dict
+    if not values_list or not values_list[0]:
+        return return_dict
+    
     for i, metric_name in enumerate(values_list[0].keys()):
         loss_vals = np.array([s[metric_name][0] for s in scores.values()])
 
